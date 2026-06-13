@@ -1,0 +1,773 @@
+# AZ-104 · Apuntes de Estudio — Módulo 1 (Requisitos previos)
+
+Estos apuntes organizan por **temas conceptuales** todo lo necesario para responder correctamente las 48 preguntas del PDF. En vez de memorizar cada pregunta, entiende el concepto detrás — en el examen real las preguntas cambian los nombres pero la lógica es la misma.
+
+---
+
+## 1. Organización de recursos: Management Groups, Subscriptions, Resource Groups, Tags
+
+### Jerarquía de Azure
+```
+Tenant Root Group
+  └── Management Group (MG)
+        └── Subscription
+              └── Resource Group (RG)
+                    └── Recursos (VM, VNet, Storage, etc.)
+```
+
+- **Management Groups (MG)**: agrupan subscriptions para aplicar políticas/RBAC a gran escala. Solo Global Administrator de Azure AD (o quien tenga el rol) puede crear el primer MG.
+- **Resource Group (RG)**: contenedor lógico de recursos. Un recurso solo puede estar en **un** RG a la vez, pero se puede **mover** entre RGs (con restricciones, ver sección 7).
+- **Tags (etiquetas)**: pares clave-valor para **categorizar/agrupar** recursos para facturación, automatización, organización. 
+  - ✅ Para asociar VMs a departamentos → **asignar etiquetas a las VMs** (Pregunta 1). No hace falta crear un RG ni un MG por departamento — eso sería excesivo.
+  - Los tags se heredan/se pueden forzar vía **Azure Policy** (ver sección 3).
+  - **No todos los niveles soportan tags**: Tenant Root Group y Management Groups **NO** soportan tags ni locks. Solo **Subscription, Resource Group y recursos individuales** (Pregunta 14):
+    - **Locks**: Sub1, RG1, VM1 (no en Tenant Root Group ni MG1)
+    - **Tags**: Sub1, RG1, VM1 (mismo conjunto)
+
+### Reporte de costos por departamento (Pregunta 11)
+Secuencia correcta para generar informe de costos por departamento cuando los recursos están repartidos en varios RGs:
+1. **Assign a tag to each resource** (etiquetar cada recurso individual con su departamento)
+2. **From the Cost analysis blade, filter the view by tag**
+3. **Download the usage report**
+
+> Nota: etiquetar solo el RG no sirve porque cada departamento usa recursos en *varios* RGs (un RG puede tener recursos de distintos departamentos).
+
+---
+
+## 2. Azure Policy
+
+### Conceptos clave
+- **Scope (alcance)**: dónde se aplica la política (MG, Subscription, RG).
+- **Exclusions**: sub-alcances dentro del scope que quedan exentos.
+- **Inicialización**: las políticas se **heredan hacia abajo** en la jerarquía (de MG → Subscription → RG → recurso), nunca hacia arriba.
+- **Efectos comunes**:
+  - `Deny`: bloquea la creación/actualización de recursos que no cumplan.
+  - `Append` / `Modify`: agrega automáticamente propiedades (p. ej. tags) a los recursos.
+  - `Audit`: solo registra, no bloquea.
+
+### Ejemplo: política "Not allowed resource types" (Pregunta 8)
+- Scope = Subscription1
+- Exclusions = Subscription1/ContosoRG1
+- Parámetro "Not allowed resource types" = Microsoft.SqlServers
+
+➡️ **Efecto**: No puedes crear SQL servers en NINGÚN RG de Subscription1 **excepto** en ContosoRG1 (porque está excluido de la política Deny).
+✅ Respuesta: **"Puede crear servidores SQL Azure solo en ContosoRG1"**
+
+### Herencia de políticas en Management Groups (Pregunta 7)
+Jerarquía:
+```
+Tenant Root Group
+  ├── ManagementGroup11
+  │     └── ManagementGroup21 → Subscription1
+  └── ManagementGroup12 → Subscription2
+```
+Políticas:
+- "Not allowed resource types: virtualNetworks" → scope = Tenant Root Group (afecta a TODO, incluidas Sub1 y Sub2)
+- "Allowed resource types: virtualNetworks" → scope = ManagementGroup12 (afecta solo a Sub2)
+
+Razonamiento:
+- **¿Crear VNet en Subscription1?** Hereda la negación del Tenant Root Group → **NO** (sin importar la política de MG12, que no le aplica)
+- **¿Crear VM en Subscription2?** La política de "Allowed resource types: virtualNetworks" en MG12 NO prohíbe VMs, solo *restringe* lo permitido a VNets para... en realidad esto se evalúa: si "Allowed resource types" lista solo virtualNetworks, entonces SOLO se permiten VNets, todo lo demás (incluidas VMs) queda bloqueado → **NO**
+- **¿Agregar Subscription1 a ManagementGroup11?** Operación administrativa de jerarquía, no depende de las políticas de recursos → **SÍ** (es posible mover subscriptions entre MGs si tienes permisos)
+
+### Asignación y exclusión de políticas en jerarquía (Pregunta 17)
+Jerarquía: Tenant Root Group → ManagementGroup1 → Subscription1 → RG1 → VM1
+
+- **¿A qué se puede ASIGNAR Política1?** A cualquier nivel desde donde se definió hacia abajo. Si Política1 se crea en ManagementGroup1, se puede asignar a: **Tenant Root Group, ManagementGroup1, Subscription1, y RG1** (los niveles donde aplica la jerarquía descendente desde donde existe la definición).
+- **¿Qué se puede EXCLUIR?** Solo los niveles **dentro** del scope de asignación, hacia abajo (sub-alcances). Si se asigna en ManagementGroup1, se puede excluir: Subscription1, RG1, VM1 — pero conceptualmente las opciones del examen suelen ser del tipo "Tenant Root Group, ManagementGroup1, Subscription1, RG1, y VM1" como conjunto completo de exclusiones posibles.
+
+> 🔑 **Regla mental**: Asignar = desde el nivel de definición hacia ARRIBA en la lista de opciones (niveles donde la política puede "vivir"); Excluir = cualquier cosa DENTRO del alcance asignado.
+
+### Etiquetado automático con política "Append/Modify" (Preguntas 9 y 28)
+
+**Pregunta 28** — Setup:
+- RG1 ya tiene tag `tag1:value1`
+- Policy1 (scope = Subscription1, sin exclusiones) agrega `tag2:value2` a TODOS los recursos
+- Se crea storage1 en RG1 con tag manual `tag3:value3`
+
+➡️ Resultado:
+- **RG1**: mantiene `tag1:value1` Y se le agrega `tag2:value2` → **"tag1":"value1" and "tag2":"value2"**
+  - (La política de "append tags" generalmente solo se aplica a *recursos*, no siempre retroactivamente a RGs ya existentes, pero en el contexto del examen la política se aplica a Sub1 sin exclusión y RG1 está dentro del scope, así que recibe tag2 además de tag1 ya existente)
+- **storage1**: tiene su tag manual `tag3:value3` Y la política le agrega `tag2:value2` → **"tag2":"value2" and "tag3":"value3" only**
+
+### Política de etiquetado con exclusiones (Pregunta 15)
+- Política: Scope=Sub1, Exclusions=Sub1/RG1/VNET1, agrega Tag4:value4, enforcement=habilitada
+- Tags existentes: Sub1→Tag1:subscription, RG1→Tag2:IT, storage1→Tag3:value1, VNET1→Tag3:value2
+
+➡️ Análisis (Pregunta 16, área de respuesta relacionada):
+- **RG1**: dentro del scope (no excluido) → recibe Tag4:value4 además de Tag2:IT → "RG1 has Tag2:IT tag assigned only" = **No** (tiene Tag2 Y Tag4)
+- **storage1**: dentro del scope → recibe Tag4 además de Tag3:value1. La afirmación "Storage1 has Tag1:subscription, Tag2:IT, Tag3:value1, and Tag4:value4 tags assigned" = **No** (storage1 no hereda tags de Sub1 ni de RG1 automáticamente — solo tiene los suyos + los que la política le agregue: Tag3:value1 y Tag4:value4)
+- **VNET1**: está EXCLUIDO de la política → NO recibe Tag4. "VNET1 has Tag2:IT and Tag3:value2 tags assigned only" = **No** (VNET1 solo tiene Tag3:value2, no tiene Tag2:IT porque los tags no son heredados automáticamente entre recursos)
+
+> 🔑 **Regla clave**: Los **tags NO se heredan automáticamente** de Subscription→RG→recurso. Cada nivel tiene sus propios tags salvo que una **Azure Policy** los propague explícitamente.
+
+---
+
+## 3. Locks (Bloqueos de recursos)
+
+- **Tipos**: `CanNotDelete` (Delete lock) y `ReadOnly`.
+- Se pueden aplicar a: Subscription, Resource Group, recurso individual.
+- **Se heredan hacia abajo**: un lock en RG2 (tipo Delete) aplica también a TODOS los recursos dentro de RG2, **salvo que el recurso tenga uno propio** (el más restrictivo gana, pero ambos aplican).
+
+### Mover recursos entre RGs con locks (Pregunta 41)
+- RG1: sin lock
+- RG2: lock tipo **Delete** ("CanNotDelete")
+- storage2 (en RG2): tiene su propio lock Delete
+- VNET2 (en RG2): tiene lock **ReadOnly**
+- IP2 (en RG2): sin lock propio
+
+**Mover recursos NO está bloqueado por un lock tipo Delete** (mover no es "eliminar" en el origen para el lock... aunque técnicamente Azure SÍ bloquea el "move" si hay un lock CanNotDelete o ReadOnly en el recurso o en su RG, porque mover implica eliminar la entrada en el RG origen).
+
+Reglas reales de Azure:
+- Un lock `CanNotDelete` en el RG **bloquea mover recursos fuera de ese RG** (porque "move" = delete del origen).
+- Un lock `ReadOnly` también bloquea el movimiento.
+
+➡️ **De RG1 a RG2**: RG1 no tiene lock → se pueden mover libremente. Pero el destino (RG2) tiene lock Delete — esto generalmente **no impide recibir** recursos (el lock del destino no bloquea "agregar"). Así que **IP1, VNET1 y storage1 (todo lo de RG1) se puede mover a RG2** → respuesta: **"IP1, VNET2, and storage1"** tipo de opción (ojo: revisa los nombres exactos en tu examen, la lógica es "todo lo de RG1 se puede mover").
+
+➡️ **De RG2 a RG1**: 
+- storage2 tiene lock Delete propio → **NO se puede mover**
+- VNET2 tiene lock ReadOnly propio → **NO se puede mover**
+- IP2 sin lock propio, pero RG2 tiene lock Delete a nivel de grupo → el lock del RG2 (heredado) también bloquea el movimiento de IP2
+- ➡️ Resultado más probable: **"None"** (nada se puede mover de RG2 a RG1 porque el lock del RG2 bloquea todas las salidas)
+
+> 🔑 **Regla clave**: Un lock `CanNotDelete` o `ReadOnly` en el **Resource Group** bloquea **mover cualquier recurso fuera** de ese RG, sin importar si el recurso individual tiene su propio lock.
+
+### Eliminar un Resource Group con dependencias (Preguntas 10 y 13)
+
+**Pregunta 10** — RG26 contiene VM1, RGV1 (Recovery Services Vault), SQLDB01, sa001. SQLDB01 tiene backup en RGV1. La eliminación de RG26 falla.
+➡️ **Primero**: **Detener (deshabilitar) la copia de seguridad de SQLDB01** — un Recovery Services Vault no se puede eliminar si tiene backups activos/datos almacenados. Hay que quitar la protección de backup antes.
+✅ Respuesta: **C. Detener la copia de seguridad de SQLDB01**
+
+**Pregunta 13** — TestRG contiene:
+- VM1 (con backup diario a Vault1)
+- Vault1 (contiene todos los backups de VM1)
+- VNET1 (tiene lock tipo **Delete**)
+
+➡️ **Primero**: 
+1. **Eliminar el resource lock de VNET1** (de lo contrario nada en el RG se puede eliminar, ya que el lock bloquea la eliminación del RG completo)
+2. **Eliminar todos los datos en Vault1** (los Recovery Services Vaults no se pueden eliminar con datos de backup dentro)
+
+✅ Respuesta: **B. Elimine el bloqueo de recursos de VNET1 y elimine todos los datos en Vault1**
+
+> 🔑 **Patrón de examen**: Para eliminar un RG, primero hay que:
+> 1. Quitar **locks** de cualquier recurso dentro del RG (o del RG mismo).
+> 2. Quitar/deshabilitar **backups** de Recovery Services Vault (no se puede borrar un vault con datos protegidos).
+
+---
+
+## 4. RBAC (Role-Based Access Control)
+
+### Roles incorporados clave
+| Rol | Permisos |
+|---|---|
+| **Owner** | Acceso total + gestionar acceso (asignar roles) |
+| **Contributor** | Crear/gestionar todos los recursos, pero **NO** puede asignar roles ni gestionar permisos de acceso |
+| **Reader** | Solo lectura |
+| **User Access Administrator** | Gestionar el acceso de usuarios a recursos Azure (asignar roles), pero no gestiona los recursos en sí |
+| **Network Contributor** | Crear y administrar recursos de red (VNets, NICs, Load Balancers, NSGs) |
+| **Storage Account Contributor** | Gestionar storage accounts, NO acceso a datos dentro |
+| **Reader and Data Access** | Leer storage account Y acceso a las claves/datos (listar claves de acceso, blobs, etc.) |
+| **Virtual Machine Contributor** | Gestionar VMs (crear, iniciar, detener, redimensionar) pero NO acceder al VNet/subred a menos que tenga permisos de red |
+| **Virtual Machine User Login** | Iniciar sesión en VM como usuario normal (Azure AD auth) |
+| **Virtual Machine Administrator Login** | Iniciar sesión en VM como administrador local |
+
+### Privilegio mínimo para Load Balancers (Pregunta 6)
+- LB1 = internal LB, LB2 = public LB, ambos en RG1
+- Admin1 debe poder administrar ambos siguiendo privilegio mínimo
+
+➡️ Para **agregar un backend pool a LB1** o **agregar un health probe a LB2**, la operación correcta y de menor privilegio es:
+✅ **Network Contributor on LB1** (para backend pool de LB1)
+✅ **Network Contributor on LB2** (para health probe de LB2)
+
+> No se necesita "Network Contributor on RG1" (demasiado amplio) ni "Owner" (excesivo) ni "Contributor" genérico (no incluye permisos de red específicos en otros recursos).
+
+### Roles personalizados (Custom Roles) — Pregunta 12
+
+Requisitos para CR1:
+- Solo asignable a RGs dentro de Subscription1 (no a la subscription entera)
+- Impide gestión de permisos de acceso (no Authorization)
+- Permite ver/crear/modificar/eliminar recursos dentro de RGs
+
+➡️ Configuración JSON:
+```json
+"assignableScopes": [
+    "/subscriptions/c276fc76-9cd4-44c9-99a7-4fd71546436e/resourceGroups"
+],
+"permissions": [
+    {
+        "actions": ["*"],
+        "notActions": [
+            "Microsoft.Authorization/*"
+        ],
+        ...
+    }
+]
+```
+- **assignableScopes**: usar el formato que apunta a **resource groups dentro de la subscription** (`.../resourceGroups`) — NO el nivel de subscription completa (`/subscriptions/{id}`) porque el requisito dice "solo se puede asignar a los resource groups".
+- **notActions**: `Microsoft.Authorization/*` — esto **excluye** (bloquea) todas las acciones de gestión de roles/permisos (RBAC), cumpliendo "impide la gestión de permisos de acceso".
+- `actions: ["*"]` da control total sobre recursos (ver/crear/modificar/eliminar), y `notActions` resta lo de autorización.
+
+> 🔑 **Concepto clave**: `actions` = lo que SÍ se permite. `notActions` = excepciones que se RESTAN de `actions`. `Microsoft.Authorization/*` controla permisos de RBAC/locks/políticas — **excluir esto** impide gestionar accesos.
+
+### Custom Role JSON real (Pregunta 16)
+Un rol personalizado con muchas acciones de `Microsoft.Compute/*`, `Microsoft.Network/*`, sin `notActions`, `dataActions` ni `notDataActions`.
+
+Conceptos:
+- `"Microsoft.Resources/deployments/*"` permite implementar plantillas ARM.
+- `"Microsoft.Network/virtualNetworks/subnets/join/action"` permite unir NICs a subredes.
+- `"Microsoft.Network/publicIPAddresses/join/action"` permite asociar IPs públicas.
+- Si **NO** incluye `"Microsoft.Compute/virtualMachines/login/action"` o similar (data action de Azure AD login), **NO** permite iniciar sesión en la VM vía Azure AD (eso requiere `dataActions`, que está vacío `[]`).
+
+➡️ Por tanto: el rol permite crear/administrar VMs y redes, pero **no permite iniciar sesión interactivamente** en las VMs (eso necesitaría `dataActions` con `Microsoft.Compute/virtualMachines/login/action`).
+
+### Modificar roles personalizados existentes (Pregunta 18)
+- Custom role con assignableScopes = [RG1 en Sub1]
+- Necesitas aplicarlo a cualquier RG en Sub1 Y Sub2, con mínimo esfuerzo
+
+✅ **A. Selecciona el rol personalizado existente, agrega Sub1 y Sub2 a assignableScopes, y elimina RG1 de assignableScopes.**
+
+> 🔑 No hace falta crear roles nuevos — **editar el assignableScopes de un rol existente** es más eficiente. `assignableScopes` puede contener múltiples subscriptions/RGs.
+
+### RBAC roles y asignaciones — análisis de jerarquía (Pregunta 21)
+- Tenant con Sub1, Sub2, Sub3 vinculados a un AD tenant
+- Usuario1 ∈ Grupo1
+- MG1 contiene Sub1 y Sub2
+- RG1 (en Sub1) contiene 5 funciones Azure (Azure Functions)
+- Asignaciones en MG1: Grupo1 = Reader, Usuario1 = User Access Administrator
+- Usuario1 también tiene Virtual Machine Contributor en Sub1 y Sub2
+
+Captura de pantalla muestra RG1 → Access control (IAM) → Role assignments: Group1 = Owner (scope: "This resource" = RG1), y otro usuario = Owner (scope: Subscription, inherited).
+
+➡️ Razonamiento sobre afirmaciones tipo "¿Puede Usuario2 obtener el rol Owner en RG1 agregándolo a Grupo1?":
+- Usuario1 tiene **User Access Administrator** en MG1 → hereda a Sub1, Sub2, y todos los RGs debajo, incluido RG1. Esto significa Usuario1 **puede asignar roles** (incluido Owner) en RG1.
+- Si Grupo1 ya tiene el rol Owner asignado directamente en RG1 ("This resource"), **agregar un usuario a Grupo1 le da automáticamente ese rol heredado** del grupo → SÍ es posible dar Owner a un nuevo usuario vía pertenencia a Grupo1.
+- Asignar el rol Owner **directamente a un grupo** (Grupo3) también es válido si Usuario1 (con User Access Administrator) hace la asignación.
+
+> 🔑 **User Access Administrator** = puede asignar **cualquier rol** (incluido Owner) a cualquier identidad, dentro de su scope, pero **no puede gestionar los recursos** en sí (no es Contributor).
+
+### Análisis de grupos y Azure AD roles (Pregunta 20)
+- User1 ∈ Group1 (Security, "Azure AD roles can be assigned to the group" = Yes)
+- User2 ∈ Group2 (Security, = Yes)
+- User3 ∈ Group3 (Microsoft 365, = Yes)
+
+➡️ Conceptos:
+- Un grupo de **seguridad (Security)** con "Azure AD roles can be assigned to the group" = Yes → se le pueden asignar **roles de Azure AD** (administrativos, ej. Global Admin) directamente al grupo (función "role-assignable groups", requiere licencia Premium P1/P2).
+- Un grupo **Microsoft 365** generalmente **NO** soporta asignación de roles de Azure AD aunque diga "Yes" en algunas configuraciones — pero RBAC de **recursos Azure** (Owner/Contributor en un RG) SÍ se puede asignar a **cualquier tipo de grupo** de Azure AD (Security o M365), siempre que el grupo exista y tenga miembros.
+
+> 🔑 Diferencia importante: 
+> - **RBAC de recursos Azure (Owner, Contributor, etc. sobre RG/Sub/recursos)** → se puede asignar a CUALQUIER grupo de seguridad o M365.
+> - **Roles de Azure AD (Global Admin, etc.)** → solo a grupos marcados como "role-assignable" (Security groups con esa propiedad habilitada, requiere P1/P2).
+
+### Roles para tareas específicas (Pregunta 19)
+- Usuario1: debe **ver datos** en cualquier storage account de Sub1 → necesita un rol de **datos** de almacenamiento de solo lectura, ej. **Reader and Data Access** o **Storage Blob Data Reader** a nivel Sub1.
+- Usuario2: debe **asignar el rol de Colaborador (Contributor) para storage accounts a otros usuarios** → necesita **User Access Administrator** a nivel Sub1 (porque solo ese rol permite asignar roles a otros, con privilegio mínimo, sin darle control total como Owner).
+
+> 🔑 "Asignar roles a otros usuarios" = siempre pensar en **User Access Administrator** (o Owner, pero UAA es más mínimo).
+
+### Role assignment JSON — análisis (Pregunta 45 y 46)
+
+**Pregunta 46** — 4 role assignments:
+- User1: Owner @ subscription scope
+- User2: Owner @ RG2
+- User3: Owner @ Microsoft.Compute/virtualMachines/VM1 (dentro de RG1)
+- User4: Contributor @ RG1
+
+➡️ "¿Quién tiene el rol Owner para VM1?" 
+- User1 (Owner a nivel subscription) → hereda a VM1 → SÍ
+- User3 (Owner directo en VM1) → SÍ
+- User2 (Owner en RG2, NO en RG1 donde está VM1) → NO
+- User4 (Contributor en RG1, no Owner) → NO
+✅ **"User1 and User3 are"** asignados Owner para VM1
+
+➡️ "¿Quién puede crear una VM en RG1?"
+- Crear un recurso requiere al menos **Contributor** (o superior) en ese RG o heredado desde arriba.
+- User1 (Owner a nivel subscription, hereda a RG1) → SÍ puede
+- User4 (Contributor directo en RG1) → SÍ puede
+- User2 (Owner solo en RG2) → NO
+- User3 (Owner solo en VM1, recurso específico, no en RG1 en general) → NO puede crear *nuevos* recursos en RG1
+✅ **"User1 and User4"**
+
+> 🔑 **Reglas de herencia RBAC**:
+> - Los roles asignados en un nivel superior (Subscription) se **heredan** hacia abajo (RG, recursos).
+> - Un rol asignado a un **recurso específico** NO se hereda "hacia los lados" a otros recursos del mismo RG, ni da permisos a nivel RG.
+> - Para **crear** un recurso nuevo dentro de un RG necesitas permisos de escritura a nivel RG (heredados o directos), no basta con tener un rol sobre un recurso existente dentro de ese RG.
+
+### Pregunta 47 — Multi-subscription RBAC
+- Sub1 ∈ MG1, Sub2 ∈ MG2
+- RG1 ∈ Sub1, RG2 ∈ Sub2
+- VM1 ∈ RG1, VM2 y VM3 ∈ RG2
+- User1: Virtual Machine Contributor @ MG1, Virtual Machine User Login @ Sub2
+- User2: Virtual Machine Contributor @ MG2, Virtual Machine User Login @ Sub1, Virtual Machine User Login @ VM3
+
+➡️ "User1 can sign in to VM1": User1 tiene **Virtual Machine Contributor** en MG1 (que incluye Sub1→RG1→VM1) pero Contributor **NO incluye permiso de login** (eso es una `dataAction` separada). User1 NO tiene "VM User Login" en Sub1/MG1. → **No**
+
+➡️ "User2 can manage disks and disk snapshots of VM1": User2 tiene Virtual Machine Contributor solo en MG2 (Sub2). VM1 está en Sub1/RG1, fuera de MG2. User2 no tiene Contributor sobre VM1. → **No**
+
+➡️ "User2 can manage disks and disk snapshots of VM3": VM3 ∈ RG2 ∈ Sub2 ∈ MG2, y User2 tiene Virtual Machine Contributor en MG2 → SÍ puede gestionar discos de VM3. → **Sí**
+
+> 🔑 **Virtual Machine Contributor** permite gestionar la VM y sus discos/snapshots, **pero no permite "log in"** — eso requiere los roles de datos **Virtual Machine User Login** o **Virtual Machine Administrator Login** asignados específicamente.
+
+---
+
+## 5. Plantillas ARM (Azure Resource Manager Templates)
+
+### Estructura básica
+```json
+{
+  "$schema": "...",
+  "contentVersion": "1.0.0.0",
+  "parameters": { },
+  "variables": { },
+  "resources": [ ],
+  "outputs": { }
+}
+```
+
+### Availability Sets — Fault Domains y Update Domains (Preguntas 3 y 4)
+- **platformFaultDomainCount**: número de "racks" físicos lógicos. Para máxima disponibilidad ante fallos de hardware/energía → usar el **valor MÁXIMO** permitido (generalmente 2-3 según región).
+  ✅ Respuesta P3: **D. Valor máximo**
+- **platformUpdateDomainCount**: número de grupos que se actualizan secuencialmente durante mantenimiento de Azure. El valor máximo es **20**.
+  ✅ Respuesta P4: **B. 20**
+
+> 🔑 Para maximizar la cantidad de VMs accesibles durante fallas/mantenimiento → usar los valores **máximos** tanto de Fault Domain Count como de Update Domain Count.
+
+### Discos de datos dinámicos con copyIndex (Pregunta 35)
+Para crear múltiples discos de datos con un número variable definido por parámetro:
+```json
+"copy": {
+    "name": "datadiskscopy",
+    "count": "[parameters('numberOfDataDisks')]"
+},
+"dataDisks": [
+    {
+        "lun": "[copyIndex('dataDisks')]",
+        "diskSizeGB": 1023,
+        "createOption": "Empty"
+    }
+]
+```
+- **`copy`**: bloque que indica que el sub-recurso/elemento se debe repetir N veces (iteración).
+- **`copyIndex('dataDisks')`**: devuelve el índice (0,1,2,...) de la iteración actual del bucle nombrado "dataDisks" — se usa para asignar un **lun (Logical Unit Number)** único a cada disco.
+
+✅ Para "lun" usar: **`[copyIndex('dataDisks')]`**
+
+### Plantillas anidadas / linked templates (Pregunta 36)
+Una plantilla principal crea un Resource Group (`Microsoft.Resources/resourceGroups`) Y luego despliega otra plantilla anidada (`Microsoft.Resources/deployments`) dentro de ese RG para crear el storage account.
+
+- Crear un Resource Group desde una plantilla solo es posible si el **scope de la implementación es a nivel de Subscription o Management Group**, no a nivel de Resource Group (que es lo más común).
+
+¿Qué cmdlet implementa esta plantilla?
+✅ **D. New-AzDeployment** (o "Implementación de New-Az" — el cmdlet `New-AzDeployment` se usa para implementaciones a nivel de **subscription** o superior, necesario cuando la plantilla crea Resource Groups).
+
+> Comparar con `New-AzResourceGroupDeployment`, que despliega DENTRO de un RG existente (no puede crear RGs).
+
+### Crear máquina virtual desde plantilla con dependencias (Pregunta 39)
+Para que la VM dependa de su NIC y use la imagen correcta:
+```json
+"dependsOn": [
+    "[resourceId('Microsoft.Network/networkInterfaces/', 'VM1')]"
+],
+"properties": {
+    "storageProfile": {
+        "imageReference": {
+            "publisher": "MicrosoftWindowsServer",
+            "offer": "WindowsServer",
+            "sku": "2019-Datacenter",
+            "version": "latest"
+        }
+    }
+}
+```
+- **`resourceId()`**: función ARM que construye el ID completo de un recurso a partir de su tipo y nombre — se usa dentro de `dependsOn`.
+- **`imageReference`**: nombre de la sección dentro de `storageProfile` que especifica la imagen del marketplace (publisher/offer/sku/version) — opciones como "Array", "Image", "vhd" son incorrectas; **"ImageReference"** es la correcta para imágenes de Marketplace.
+
+✅ Respuestas: `dependsOn` → **`resourceId`**; sección de storageProfile → **`imageReference`**
+
+### Unir VM a dominio Active Directory vía extensión (Pregunta 37)
+Se usa la extensión **JsonADDomainExtension**:
+```json
+{
+    "type": "extensions",
+    "name": "[concat(parameters('VMName'), '/joindomain')]",
+    "properties": {
+        "publisher": "Microsoft.Compute",
+        "type": "JsonADDomainExtension",
+        "typeHandlerVersion": "1.3",
+        "settings": {
+            "Name": "[parameters('domainName')]",
+            "User": "[parameters('domainusername')]",
+            "Restart": "true",
+            "Options": "3"
+        },
+        "protectedSettings": {
+            "Password": "[parameters('domainPassword')]"
+        }
+    }
+}
+```
+- **`"type": "Microsoft.Compute/virtualMachines/extensions"`** es el tipo correcto para una extensión de VM (no "Microsoft.Compute/virtualMachines" solo, ni solo "Extensions").
+- **`protectedSettings`** (no `settings`, ni `statuses`) es donde va el **password**, porque `protectedSettings` se **cifra** y no se registra en logs/historial de implementación — ¡muy importante para datos sensibles!
+
+✅ Respuestas: `type` → **`Microsoft.Compute/virtualMachines/extensions`**; sección del password → **`protectedSettings`**
+
+### Contraseñas seguras en ARM templates (Pregunta 5)
+Para que una contraseña administrativa no se almacene en texto plano dentro de la plantilla ARM:
+✅ Crear un **Azure Key Vault** y referenciar el secreto desde el archivo de parámetros (`parameters.json`) usando una referencia a Key Vault (`"reference"` con `keyVault.id` y `secretName`), en lugar de pasar la contraseña como texto plano.
+
+> 🔑 Patrón: "ARM template + secret/password sin texto plano" → siempre **Azure Key Vault** + referencia en el parameters file.
+
+### Mode: Complete vs Incremental (Pregunta 38)
+```powershell
+New-AzResourceGroupDeployment -TemplateUri "https://contoso.com/template1" `
+  -TemplateParameterFile params.json `
+  -ResourceGroupName RG1 `
+  -Mode Complete
+```
+- **`-ResourceGroupName`**: parámetro correcto para especificar el RG destino (no "Name", "QueryString" ni "-Tag").
+- **`-Mode Complete`**: **elimina** todos los recursos del RG que NO estén definidos en la plantilla antes de desplegar los nuevos. 
+- **`-Mode Incremental`** (default): agrega/actualiza recursos de la plantilla, pero **deja intactos** los recursos existentes no mencionados.
+
+✅ Para "eliminar todos los recursos existentes de RG1 antes de implementar los nuevos" → **`-ResourceGroupName RG1 -Mode Complete`**
+
+### Crear VM desde Cloud Shell con plantilla ARM (Pregunta 34)
+Comando típico (Azure CLI / PowerShell desde Cloud Shell):
+```
+New-AzResourceGroupDeployment -ResourceGroupName RG1 -TemplateFile azuredeploy.json `
+  -resourceGroupName "RG1" `
+  -subscriptionId "9c8bc1cd-7655-4c66-b3ea-a8ee101d8f75" `
+  -administratorLoginPassword (Read-Host -Prompt "Enter the administrator password" -AsSecureString)
+```
+- `-ResourceGroupName` → nombre del RG (RG1, no ManagementGroup1 ni el GUID)
+- Parámetros de plantilla se pasan como `-<nombreDelParametro>` adicionales
+- El **Subscription ID** (GUID) se usa para `-subscriptionId`, no como nombre de tag ni de RG.
+- "Tag1" es una etiqueta, no se referencia en el comando de implementación de VM directamente salvo que sea un parámetro de la plantilla.
+
+> 🔑 Identificar tipos de datos por su formato: GUID = Subscription ID; nombre simple = RG o MG; nombre con prefijo "Tag" = etiqueta.
+
+### Plantilla ARM para Storage Account — análisis de propiedades (Pregunta 24)
+Plantilla con:
+```json
+"properties": {
+    "accessTier": "Hot",
+    "supportsHttpsTrafficOnly": false,
+    "networkAcls": {
+        "bypass": "AzureServices",
+        "defaultAction": "Allow",
+        "ipRules": []
+    },
+    "deleteRetentionPolicy": { "enabled": true, "days": 6 },
+    "isVersioningEnabled": true,
+    ...
+    "sku": { "name": "Standard_LRS" }
+}
+```
+- **`deleteRetentionPolicy` (enabled: true, days: 7 o 6)**: habilita **soft delete** para blobs → cambios/eliminaciones se pueden **revertir** dentro del período especificado.
+  - "Changes made to data in storage1 can be rolled back after seven days" → depende del valor exacto de `days`. Si days=7 → **Sí** se pueden revertir DENTRO de ese período (pero NO "after" 7 días — pasado ese tiempo ya no se puede revertir). Hay que leer la afirmación con cuidado: si dice "después de 7 días" (fuera del período) → **No**.
+- **`networkAcls.defaultAction: "Allow"`**: permite tráfico desde **cualquier red**, no solo desde una región específica → "Only users in East US Azure region can connect" → **No** (defaultAction Allow = acceso global salvo reglas explícitas).
+- **`sku.name: "Standard_LRS"`** (Locally Redundant Storage) = solo **3 copias en UNA región** (no replicado entre regiones). 
+  - "Three copies of storage1 will be maintained in the East US Azure region" → si la cuenta está en East US y es LRS → **Sí** (LRS mantiene 3 copias dentro de la misma región/datacenter).
+
+> 🔑 SKUs de redundancia de Storage:
+> - **LRS** (Locally Redundant): 3 copias, 1 región/datacenter
+> - **ZRS** (Zone Redundant): copias en 3 zonas de disponibilidad, misma región
+> - **GRS/GZRS**: copias también en una región secundaria emparejada
+
+---
+
+## 6. Almacenamiento (Storage Accounts)
+
+### Azure Import/Export Service (Pregunta 23)
+Para preparar discos para un trabajo de **importación** a un storage account, se necesitan crear (antes de usar `WAImportExport.exe`):
+✅ **B. Un archivo CSV de "dataset"** (conjunto de datos — qué carpetas/archivos copiar)
+✅ **E. Un archivo CSV de "drive set"** (conjunto de unidades — información de las unidades físicas)
+
+> El manifiesto XML se genera automáticamente por la herramienta, no se crea manualmente de antemano; no se necesita PS1 ni JSON config.
+
+### RBAC Conditions en Storage (Pregunta 25)
+Azure permite agregar **condiciones (ABAC)** a las asignaciones de roles para limitar el acceso basado en atributos (ej. nombre de blob, etiqueta).
+
+➡️ **Servicios de Storage que soportan condiciones de RBAC**: **Blob Containers (Blobs) y Queues (colas)** únicamente — NO file shares, NO tables.
+✅ Respuesta: **E. Solo contenedores y colas**
+
+---
+
+## 7. Mover y administrar recursos / Auditoría
+
+### Ver fecha/hora de creación de recursos (Preguntas 27, 29-31)
+Necesitas ver CUÁNDO se crearon los recursos de RG1 (desplegados vía plantillas).
+
+| Solución propuesta | ¿Cumple? | Por qué |
+|---|---|---|
+| Subscriptions → "Implementación programática" (Programmatic deployment) | ❌ No | Esa hoja es para configurar el registro de proveedores de Marketplace, no historial |
+| Subscriptions → "Proveedores de recursos" (Resource providers) | ❌ No | Lista proveedores registrados, no historial de implementaciones |
+| RG1 → "Script de automatización" (Automation script) | ❌ No | Exporta la plantilla ARM actual, no muestra fechas |
+| **RG1 → "Implementaciones" (Deployments)** | ✅ Sí | Muestra historial de implementaciones con **fecha y hora** de cada despliegue |
+
+> 🔑 Para auditar **cuándo se crearon recursos vía plantilla** → siempre **Resource Group → Deployments**.
+
+### Mover una VM a otro host por mantenimiento (Pregunta 33)
+"Mover VM1 a un host diferente inmediatamente" (por mantenimiento de Azure) — la solución propuesta era "mover la VM a otro Resource Group" desde Overview.
+
+❌ **No cumple el objetivo**. Mover una VM entre **Resource Groups** (operación lógica de organización) **NO mueve la VM a otro host físico (fabric)**. 
+
+✅ La forma correcta sería: **redesplegar la VM** (Redeploy) desde Azure portal — esto mueve la VM a un nuevo nodo de hardware dentro del datacenter, conservando su configuración y discos.
+
+> 🔑 "Mover entre Resource Groups" = operación lógica, NO afecta el hardware subyacente. Para reubicar físicamente una VM (problemas de host) → **Redeploy**.
+
+---
+
+## 8. Plantilla guardada (VM como plantilla) — Pregunta 32
+
+Guardar VM1 como "Plantilla1" en la Azure Resource Manager library (Capture VM). Al desplegar VM2 desde esa plantilla, ¿qué se puede configurar?
+
+- ❌ Sistema operativo: viene fijo de la imagen capturada
+- ❌ Nombre de usuario admin: normalmente se reutiliza o no es configurable directamente vía esta función simplificada
+- ❌ Tamaño de VM: limitado/preconfigurado según la captura
+- ✅ **D. Resource group**: el destino (RG) donde se despliega VM2 SIEMPRE es configurable
+
+✅ Respuesta: **D. resource group**
+
+---
+
+## 9. Marketplace y Resource Providers
+
+### Aceptar términos legales de Marketplace (Pregunta 9)
+Error al implementar un recurso de Marketplace vía plantilla: "No se han aceptado términos legales para este artículo en esta subscription".
+
+✅ **C. Ejecutar `Set-AzMarketplaceTerms`** desde Azure PowerShell — este cmdlet acepta los términos legales programáticamente para que las futuras implementaciones automatizadas no fallen.
+
+❌ "Registrar el proveedor de recursos Microsoft.Marketplace" no resuelve el problema de aceptación de términos legales del *artículo específico*.
+
+---
+
+## 10. DNS
+
+### Migrar zona DNS local a Azure DNS (Pregunta 40)
+Server1 tiene zona DNS local "adatum.com" con 1000 registros. Quieres migrarla a una zona Azure DNS con mínimo esfuerzo administrativo. Herramientas disponibles: DNS Manager, Azure PowerShell, Azure CLI 2.0.
+
+✅ **A. Azure CLI** — Azure CLI tiene un comando dedicado (`az network dns zone import`) que permite **importar un archivo de zona DNS completo (formato BIND)** directamente, lo cual minimiza drásticamente el esfuerzo comparado con recrear 1000 registros manualmente.
+
+> 🔑 Azure PowerShell NO tiene una importación de zona tan directa como Azure CLI para este escenario (en el momento del examen). Azure CLI = `az network dns zone import` → ideal para migraciones masivas de zonas DNS.
+
+---
+
+## 11. Cost Management, Budgets y Advisor
+
+### Discos no conectados (unattached disks) — Pregunta 44
+Para identificar discos administrados que ya no están conectados a ninguna VM y se pueden eliminar (ahorro de costos):
+
+✅ **D. Desde Azure Cost Management, ver las recomendaciones del Advisor** (Cost Management + Billing incluye una sección que muestra las recomendaciones de Azure Advisor relacionadas con costos, incluidos discos no conectados).
+
+❌ "Cost analysis" muestra gastos pero no identifica específicamente discos huérfanos.
+❌ Storage Explorer no tiene esta funcionalidad de recomendaciones.
+
+### Presupuestos (Budgets) y Action Groups (Pregunta 26)
+Budget1: scope = RG1, amount = €1,000/mes, alertas:
+| % presupuesto | Monto | Action Group | Acción |
+|---|---|---|---|
+| 50% | €500 | AG1 | 1 Email |
+| 70% | €700 | AG2 | 1 SMS |
+| 100% | €1,000 | AG3 | 1 Azure app |
+
+VM1 (RG1, 20€/día), VM2 (RG2, 30€/día). Current spend = 5.93€.
+
+➡️ "Cuando se alcance el monto máximo en Budget1, [VM1 y VM2 / continúan ejecutándose / etc.]":
+- **Los budgets de Azure son solo de NOTIFICACIÓN, NO ejecutan acciones automáticas para detener recursos.** Alcanzar el 100% del presupuesto **NO apaga VMs automáticamente**.
+✅ **"VM1 and VM2 continue to run"**
+
+➡️ "Basado en los costos actuales de uso de las VMs, [answer choice]" — con gasto actual de 5.93€ muy por debajo de 500€ (50%):
+- Ningún umbral se ha alcanzado todavía → **"no email notifications will be sent each month"** (con el gasto actual no se dispara ninguna alerta)
+
+> 🔑 **Los Azure Budgets NUNCA detienen/eliminan recursos automáticamente** — solo envían notificaciones vía Action Groups cuando se cruzan los umbrales definidos.
+
+---
+
+## 12. Azure Monitor: Alert Rules y Alert Processing Rules
+
+### Pregunta 48 — Alert Rule + Alert Processing Rule
+- **Alerta1**: scope = todos los RGs en Sub1 (incluye recursos futuros), condición = "todas las operaciones administrativas", acción = Action1 (envía email a admin1@contoso.com)
+- **Regla1** (Alert Processing Rule): scope = Sub1, tipo = **Suprimir notificaciones**, aplica del 10 al 13 de agosto de 2022
+
+➡️ "Si creas un RG en Sub1 el 11 de agosto de 2022, ¿Alert1 aparece en el portal?"
+- Una **Alert Processing Rule de tipo "suppress notifications"** **NO desactiva la alerta ni evita que se DISPARE/REGISTRE** — solo suprime las **notificaciones/acciones** (como el envío de email). La alerta sigue **apareciendo en el portal de Azure** (Monitor → Alerts).
+✅ **Sí** (Alert1 sí se lista en el portal)
+
+➡️ "Si creas un RG el 12 de agosto de 2022, ¿se envía un email a admin1@contoso.com?"
+- La regla de supresión está activa del 10-13 agosto → las **notificaciones (incluido el email vía Action1) quedan suprimidas** durante ese período.
+✅ **No** (el email NO se envía, porque está dentro del período de supresión)
+
+➡️ "Si agregas un tag a RG1 el 15 de agosto de 2022, ¿se envía email a admin1@contoso.com?"
+- 15 de agosto está **fuera** del período de supresión (10-13 ago) → la regla de supresión ya no aplica.
+- Pero: ¿"agregar un tag" cuenta como "operación administrativa"? **Sí**, agregar/modificar tags es una operación administrativa (escritura) registrada en Activity Log → dispara Alert1.
+✅ **Sí** (se envía el email, porque está fuera del período de supresión y la acción califica como operación administrativa)
+
+> 🔑 **Alert Processing Rules ("suppress notifications")** = pausan temporalmente el **envío de notificaciones/acciones**, pero **NO** evitan que la **alerta se genere y aparezca** en el portal de Monitor.
+
+---
+
+## 13. Redes: Bastion, RDP, Just-In-Time (JIT) — Pregunta 43
+
+Escenario: 
+- VNET1, VM1 (Windows Server 2022, SIN IP pública, conectada a VNET1), Bastion1 (Azure Bastion Basic SKU, conectado a VNET1)
+- Device1 (Windows 11) tiene Azure PowerShell y CLI instalados
+- Objetivo: desde Device1, conectar por RDP a VM1 (que no tiene IP pública)
+
+➡️ Secuencia de 3 acciones correctas (de la lista de opciones disponibles):
+1. **From Azure CLI on Device1, run `az network bastion rdp`** (comando CLI que abre un túnel RDP a través de Bastion hacia la VM sin IP pública — disponible para SKU Standard, pero el flujo nativo simple aplica)
+2. (pasos relacionados con habilitar el acceso correcto)
+
+Conceptos clave del escenario:
+- **Azure Bastion** permite conectar por RDP/SSH a VMs **sin IP pública**, directamente desde el portal o vía túnel.
+- **Bastion SKU Basic** NO soporta "Native Client Support" (esa función — conectar usando el cliente RDP nativo de Windows en lugar del portal — requiere **SKU Standard**). Por eso, si la opción "From Bastion1, select Native Client Support" aparece, **requeriría primero actualizar Bastion1 a Standard SKU**.
+- Las opciones incorrectas para este escenario incluyen: "habilitar Kerberos authentication" (no es necesario para un flujo RDP básico vía Bastion con autenticación VM local), "Enable JIT VM access" (función de Microsoft Defender for Cloud, no estrictamente necesaria si Bastion ya está desplegado y la VM no tiene IP pública expuesta).
+
+> 🔑 **Azure Bastion** = acceso seguro RDP/SSH sin necesidad de IP pública en la VM ni VPN. **Basic SKU** = funcionalidad básica vía portal. **Standard SKU** = funciones avanzadas (Native Client, escalado, IP-based connection, etc.)
+
+---
+
+## 14. Resumen de patrones de examen (heurísticas rápidas)
+
+1. **"Asociar/categorizar recursos por departamento/proyecto"** → **Tags**, no nuevos RGs ni MGs (salvo que se pida explícitamente aislamiento administrativo).
+2. **"Maximizar disponibilidad ante fallos/mantenimiento"** → usar **valores MÁXIMOS** de Fault/Update Domain Count.
+3. **"Contraseña/secreto sin texto plano en plantilla ARM"** → **Azure Key Vault** + referencia en parameters.json; en la plantilla, usar **`protectedSettings`** para datos sensibles de extensiones.
+4. **"Eliminar un Resource Group falla"** → revisar **locks** (eliminar primero) y **Recovery Services Vault con backups** (deshabilitar/eliminar backups primero).
+5. **"Mover recursos entre RGs"** → revisar **locks tipo Delete/ReadOnly** en el RG origen — bloquean la salida de recursos.
+6. **"Privilegio mínimo para administrar X"** → buscar el rol **más específico posible** (ej. Network Contributor sobre el recurso concreto, no sobre todo el RG).
+7. **"Asignar roles a otros usuarios"** → pensar en **User Access Administrator**, no Owner ni Contributor.
+8. **"Rol personalizado que NO permite gestionar accesos"** → usar **`notActions: ["Microsoft.Authorization/*"]`**.
+9. **"Ver cuándo se crearon los recursos de un RG"** → **RG → Deployments**, nunca "Automation script" ni hojas de subscription.
+10. **"Budget alcanza el 100%"** → **NUNCA detiene recursos**, solo notifica.
+11. **"Alert processing rule - suppress notifications"** → la alerta **sigue apareciendo** en el portal, solo se **suprime la notificación/acción**.
+12. **"Azure Policy con exclusiones"** → los recursos EXCLUIDOS **no reciben** el efecto de la política (ni Deny ni Append de tags); los NO excluidos sí.
+13. **"-Mode Complete" en despliegues ARM** → elimina recursos no definidos en la plantilla del RG destino; **"-Mode Incremental"** (default) no los elimina.
+14. **Cmdlets de implementación**: `New-AzResourceGroupDeployment` (dentro de un RG existente) vs `New-AzDeployment` (a nivel subscription, puede crear RGs).
+15. **Tags y Locks** solo existen en: **Subscription, Resource Group, recursos** — NUNCA en Management Groups ni Tenant Root Group.
+16. **Los tags NO se heredan** entre niveles automáticamente; solo Azure Policy puede propagarlos.
+
+---
+
+## 15. Glosario rápido de comandos/cmdlets mencionados
+
+| Comando | Uso |
+|---|---|
+| `az vm create` | Crear VM desde Azure CLI (soporta personalización avanzada, ej. CA raíz personalizada) |
+| `New-AzVM` | Crear VM desde Azure PowerShell (cmdlet moderno, módulo Az) |
+| `New-AzResourceGroupDeployment` | Implementar plantilla ARM **dentro** de un Resource Group existente |
+| `New-AzDeployment` | Implementar plantilla ARM a nivel **subscription** (puede crear Resource Groups) |
+| `Set-AzMarketplaceTerms` | Aceptar términos legales de un artículo de Marketplace programáticamente |
+| `az network dns zone import` | Importar archivo de zona DNS (BIND) a Azure DNS — migración masiva |
+| `az network bastion rdp` | Conectar por RDP a una VM vía Azure Bastion desde Azure CLI |
+
+---
+
+## 16. Detalles adicionales de preguntas específicas no cubiertas en profundidad
+
+### Pregunta 2 — Crear VM Linux con CA raíz personalizada
+Necesitas implementar una VM Ubuntu **con una configuración personalizada que incluya agregar una CA raíz de confianza** durante la creación.
+
+✅ **D. `az vm create`** — Azure CLI permite usar el parámetro `--custom-data` (cloud-init) en el momento de la creación de la VM, lo cual permite inyectar configuración personalizada (como certificados CA, scripts de inicialización, paquetes, etc.) desde el primer arranque.
+
+❌ `New-AzVM` / `New-AzureRmVm` (PowerShell) no ofrecen la misma facilidad de personalización vía cloud-init en el momento de creación.
+❌ `Create-AzVM` no existe como cmdlet válido.
+
+> 🔑 **Patrón**: "VM Linux + personalización en el momento de creación (cloud-init, CA cert, scripts)" → **`az vm create --custom-data`**.
+
+### Pregunta 22 — Azure Policy sobre tipos de recursos y movimiento entre RGs
+Recursos: VNET1 (Virtual network, RG1), VNET2 (Virtual network, RG2), VM1 (Virtual machine, RG2, estado **En ejecución**).
+
+Se asigna una política cuyos parámetros incluyen los tipos:
+- `Microsoft.ClassicNetwork/virtualNetworks`
+- `Microsoft.Network/virtualNetworks`
+- `Microsoft.Compute/virtualMachines`
+
+Este patrón corresponde típicamente a una política del tipo **"Not allowed resource types"** (Deny) aplicada con esos tres tipos como parámetro — es decir, **prohíbe crear/modificar VNets y VMs** dentro del alcance de la política.
+
+➡️ Afirmaciones típicas y su análisis:
+
+- **"Un administrador puede mover VNET1 a RG2"**:
+  - Mover un recurso **existente** (operación de "move") normalmente **no está bloqueado** por una política "Not allowed resource types" — esa política bloquea **creación/escritura nueva**, no necesariamente el movimiento de un recurso ya existente entre RGs (move es más una operación de "Microsoft.Resources" que de "Microsoft.Network"). 
+  - Sin embargo, depende del **scope** de la política: si tanto RG1 como RG2 están dentro del scope de la política Deny sobre `virtualNetworks`, mover el recurso podría desencadenar una re-validación y fallar.
+  - **Respuesta dependiente del scope mostrado en el exhibit** — regla general: si la política aplica a **ambos RGs** y es tipo Deny sobre `virtualNetworks`, **No** se puede mover (porque "move" puede tratarse como "write" en el destino).
+
+- **"El estado de VM1 cambia a 'deallocated'"**:
+  - Una política Deny sobre `Microsoft.Compute/virtualMachines` **bloquea la creación/modificación** de VMs, pero **NO afecta el estado de ejecución de una VM ya existente**. El estado de VM1 sigue siendo "En ejecución" — las políticas no apagan VMs.
+  - ➡️ **No**
+
+- **"Un administrador puede modificar el espacio de direcciones de VNET2"**:
+  - Modificar el address space de una VNet es una operación de **escritura (write)** sobre `Microsoft.Network/virtualNetworks`. Si la política Deny incluye este tipo de recurso y VNET2 está dentro del scope, **No** se puede modificar.
+
+> 🔑 **Regla clave para este tipo de pregunta**: Una política **"Not allowed resource types" (Deny)** bloquea operaciones de **creación y modificación (write)** sobre los tipos especificados dentro del scope — **NUNCA** afecta el **estado de ejecución** de recursos ya desplegados (no los detiene, no los reinicia, no cambia su estado).
+
+### Pregunta 42 — Plantilla ARM con Load Balancer y dependencias
+Plantilla ARM que crea un **Load Balancer (LB1)** con backend pools, frontend configurations, y posiblemente parámetros como `sku`.
+
+Afirmaciones típicas a evaluar:
+
+- **"LB1 estará conectado a una subred llamada VNET1/nombreDeRed"**:
+  - Depende de si la plantilla referencia explícitamente esa subred en `frontendIPConfigurations` mediante `subnet.id` con `resourceId(...)`. Si el `frontendIPConfiguration` usa una **IP pública** (`publicIPAddress`) en lugar de una configuración de IP privada con subred, entonces LB1 **NO** está conectado directamente a una subred → **No**.
+  - Si el LB es **interno (Internal Load Balancer)**, su frontend SÍ está conectado a una subred específica → **Sí**.
+
+- **"LB1 solo se puede implementar en el resource group que contiene VNET1"**:
+  - Un Load Balancer **NO necesita estar en el mismo Resource Group** que la VNet a la que se conecta — los recursos pueden referenciarse entre RGs (e incluso entre subscriptions, usando `resourceId` con el ID completo). 
+  - ➡️ **No** — se puede implementar en cualquier RG, siempre que la referencia a la subred/VNet sea correcta (usando el ID completo del recurso).
+
+- **"El valor de la variable `sku` se puede proporcionar como parámetro cuando la plantilla se implementa desde un símbolo del sistema"**:
+  - Si `sku` está definido en la sección **`variables`** (no `parameters`), **NO** se puede pasar como argumento en el momento de la implementación — las **variables** son fijas/calculadas dentro de la plantilla y no se exponen como entradas externas. Solo los elementos definidos en **`parameters`** se pueden pasar desde la línea de comandos (`-sku Standard` por ejemplo).
+  - ➡️ **No** (si está en `variables`) / **Sí** (si está en `parameters`) — depende del exhibit, pero la regla es la importante.
+
+> 🔑 **Reglas clave**:
+> - `parameters` = valores configurables **desde fuera** al momento de implementar (CLI, PowerShell, portal).
+> - `variables` = valores **internos** calculados/fijos dentro de la plantilla — **NO** se pueden sobreescribir desde fuera.
+> - Un recurso (LB) puede referenciar recursos (VNet/subred) en **otro Resource Group o Subscription** usando `resourceId('<subscriptionId>', '<resourceGroupName>', '<resourceType>', '<resourceName>')`.
+> - Un **Internal Load Balancer** se conecta a una subred (IP privada); un **Public Load Balancer** se conecta a una IP pública — no a una subred directamente.
+
+---
+
+## 17. Conceptos transversales importantes que aparecen repetidamente
+
+### A. Diferencia entre "Deny" policy y "estado de recursos existentes"
+Una política de Azure (cualquier efecto: Deny, Append, Audit, Modify) actúa sobre **operaciones de escritura (create/update)** evaluadas en el momento de la solicitud (request-time). **Nunca** modifica recursos existentes retroactivamente (excepto si se ejecuta una **remediation task**, que es una acción separada y explícita) ni cambia su **estado operativo** (running/stopped/deallocated).
+
+### B. Diferencia entre operaciones "lógicas" vs "físicas" en Azure
+- **Mover un recurso entre Resource Groups / Subscriptions** = operación **lógica** (cambia metadatos/organización). No afecta:
+  - El hardware físico subyacente (host del fabric)
+  - El estado de ejecución
+  - Las direcciones IP (en general, aunque algunos recursos tienen restricciones de movimiento — ver tabla de soporte de "move" de Microsoft Docs)
+- **Redeploy / Restart** = operación **física** que puede mover una VM a otro host del datacenter (útil para resolver problemas de hardware/mantenimiento).
+
+### C. Jerarquía de herencia (de arriba hacia abajo, siempre)
+```
+Management Group → Subscription → Resource Group → Recurso
+```
+- **RBAC**: los roles se heredan hacia abajo.
+- **Azure Policy**: las asignaciones se heredan hacia abajo (con posibilidad de exclusiones en niveles inferiores).
+- **Locks**: se heredan hacia abajo (el lock más restrictivo de cualquier nivel superior aplica también a los niveles inferiores).
+- **Tags**: **NO se heredan** automáticamente (a menos que una Policy los propague).
+
+### D. "¿Esto cumple con el objetivo?" — preguntas de escenario con soluciones alternativas
+Estas preguntas (formato "Nota: esta pregunta es parte de una serie...") presentan **una solución candidata** para un objetivo dado, y debes decidir si **Sí** o **No** cumple. Estrategia:
+1. Identifica el **objetivo exacto** (ej. "ver fecha/hora de creación de recursos").
+2. Evalúa la solución propuesta **literalmente** — ¿la herramienta/blade/cmdlet mencionado realmente provee esa información o logra ese efecto?
+3. No asumas "intenciones" — si la solución usa la herramienta equivocada (aunque esté "cerca" conceptualmente, ej. "Resource providers" vs "Deployments"), la respuesta es **No**.
+4. Cada pregunta de la serie es **independiente** — diferentes soluciones para el mismo objetivo, evaluadas una por una.
+
+---
+
+## 18. Tabla resumen: ¿Qué hoja/blade de Azure Portal usar para qué?
+
+| Necesito... | Usar... |
+|---|---|
+| Ver fecha/hora de creación de recursos en un RG | **Resource Group → Deployments** |
+| Ver historial de cambios/quién hizo qué | **Activity Log** |
+| Exportar la plantilla ARM actual de un RG | **Resource Group → Export template / Automation script** |
+| Aceptar términos legales de Marketplace | PowerShell `Set-AzMarketplaceTerms` o portal en el momento de crear el recurso |
+| Identificar discos no usados para ahorrar costos | **Cost Management → Advisor recommendations** |
+| Filtrar costos por departamento/etiqueta | **Cost Management → Cost analysis → filtrar por tag** |
+| Conectar a una VM sin IP pública | **Azure Bastion** |
+| Migrar zona DNS local masivamente | **Azure CLI → `az network dns zone import`** |
+| Configurar política para forzar tags | **Azure Policy → "Add a tag and its value"** (efecto Modify/Append) |
+| Restringir tipos de recursos permitidos | **Azure Policy → "Allowed resource types" / "Not allowed resource types"** |
+
+---
+
+¡Suerte con el estudio! Repasa especialmente las secciones 2 (Policy), 3 (Locks), 4 (RBAC) y 5 (ARM templates) — son las que más se repiten en preguntas tipo "hotspot" y "drag and drop". La sección 14 y 17 son tu **chuleta rápida** antes del examen.
